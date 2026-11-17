@@ -21,8 +21,8 @@ M5Stack StopWatch (C152) の丸い画面 (466×466 AMOLED) に、小さな丸い
 arduino-cli の場合:
 
 ```
-arduino-cli compile --fqbn m5stack:esp32:m5stack_stopwatch:PSRAM=opi,USBMode=default,CDCOnBoot=cdc CatbotWalk
-arduino-cli upload  --fqbn m5stack:esp32:m5stack_stopwatch:PSRAM=opi,USBMode=default,CDCOnBoot=cdc -p <PORT> CatbotWalk
+arduino-cli compile --fqbn m5stack:esp32:m5stack_stopwatch:PSRAM=opi,USBMode=hwcdc,CDCOnBoot=cdc CatbotWalk
+arduino-cli upload  --fqbn m5stack:esp32:m5stack_stopwatch:PSRAM=opi,USBMode=hwcdc,CDCOnBoot=cdc -p <PORT> CatbotWalk
 ```
 
 ## ファイル
