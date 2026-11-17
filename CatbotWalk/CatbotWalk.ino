@@ -64,26 +64,6 @@ static const int NPONDS = sizeof(PONDS) / sizeof(PONDS[0]);
 
 M5Canvas canvas(&M5.Display);
 
-// DIAG: why did we (re)boot? shown on screen for a few seconds after start-up
-#include <esp_system.h>
-RTC_NOINIT_ATTR static uint32_t diagMagic, diagBoots;
-static int diagReason = 0;
-static const char *resetName(int r) {
-  switch (r) {
-    case ESP_RST_POWERON: return "POWERON";
-    case ESP_RST_SW: return "SW";
-    case ESP_RST_PANIC: return "PANIC";
-    case ESP_RST_INT_WDT: return "INT_WDT";
-    case ESP_RST_TASK_WDT: return "TASK_WDT";
-    case ESP_RST_WDT: return "WDT";
-    case ESP_RST_DEEPSLEEP: return "DEEPSLEEP";
-    case ESP_RST_BROWNOUT: return "BROWNOUT";
-    case ESP_RST_USB: return "USB";
-    case ESP_RST_EXT: return "EXT";
-    default: return "OTHER";
-  }
-}
-
 // ---------- deterministic world generation ----------
 static uint32_t rngState = 20261117u;
 static float frand() {  // 0..1
@@ -194,8 +174,6 @@ static Activity act = {};
 static uint8_t lastKind = ACT_NONE;
 static float actGoalDist = 1e9f;
 static float popT = -1;  static uint8_t popKind = 0;   // "got it!" icon above the Catbot
-static int tally[NACT] = {};
-static float hudT = 0;                                  // tally display time left
 static int16_t shakeIdx = -1; static float shakeT = 0;  // tree being shaken
 static const float ACT_INTERVAL_MIN = 6.0f, ACT_INTERVAL_MAX = 12.0f;  // 次のイベントまでの間隔（秒）
 
@@ -578,7 +556,6 @@ static void actBeginDo() {
 
 static void actFinish(uint8_t icon) {
   popKind = icon; popT = 0;
-  if (icon != ICON_BOOT) { tally[act.kind]++; hudT = 4.0f; }
   act.kind = ACT_NONE; act.cool = frange(ACT_INTERVAL_MIN, ACT_INTERVAL_MAX);
   ag[0].walking = false; ag[0].aiTimer = frange(1.0f, 2.0f);
 }
@@ -590,7 +567,6 @@ static void actAbort() {
 static void updateActivity(float dt) {
   Agent &P = ag[0];
   if (popT >= 0) { popT += dt; if (popT > 1.8f) popT = -1; }
-  if (hudT > 0) hudT -= dt;
   if (act.kind == ACT_NONE) {
     if (P.talkT <= 0) { act.cool -= dt; if (act.cool <= 0) tryStartActivity(); }
     return;
@@ -874,7 +850,7 @@ static void drawProp(uint8_t var, const Palette &pal, float t) {
   }
 }
 
-// "got it!" icon rising over the Catbot, and the tally strip at the top
+// "got it!" icon rising over the Catbot
 static void drawEventOverlay(float t) {
   float fx, fy;
   if (fishFly(fx, fy)) drawIcon(act.success ? ICON_FISH : ICON_BOOT, (int)fx, (int)fy, 1.4f);
@@ -890,19 +866,6 @@ static void drawEventOverlay(float t) {
     } else {   // a sweat drop
       canvas.fillCircle(x + 22, y - 6, 4, C(140, 200, 255));
       canvas.fillTriangle(x + 18, y - 7, x + 26, y - 7, x + 22, y - 15, C(140, 200, 255));
-    }
-  }
-  if (hudT > 0) {
-    static const uint8_t icons[4] = { ICON_BUG, ICON_APPLE, ICON_FLOWER, ICON_FISH };
-    int x0 = 117, y0 = 48;
-    canvas.fillRoundRect(x0, y0, 232, 34, 12, C(28, 44, 32));
-    canvas.setTextSize(2);
-    canvas.setTextColor(C(255, 255, 255));
-    for (int i = 0; i < 4; i++) {
-      int cx = x0 + 22 + i * 58;
-      drawIcon(icons[i], cx, y0 + 17, 1.0f);
-      canvas.setCursor(cx + 15, y0 + 10);
-      canvas.printf("%d", tally[i + 1]);
     }
   }
 }
@@ -1106,26 +1069,12 @@ static void drawFrame(float t) {
       canvas.fillCircle((int)fx, (int)fy, 2, FIREFLY);
     }
   }
-  if (millis() < 6000) {   // DIAG overlay
-    canvas.fillRoundRect(118, 40, 230, 62, 10, C(0, 0, 0));
-    canvas.setTextColor(C(255, 255, 255));
-    canvas.setTextSize(2);
-    canvas.setCursor(130, 50);
-    canvas.printf("rst:%s(%d)", resetName(diagReason), diagReason);
-    canvas.setCursor(130, 74);
-    canvas.printf("boot#%lu", (unsigned long)diagBoots);
-  }
   canvas.pushSprite(0, 0);
 }
 
 void setup() {
   auto cfg = M5.config();
   M5.begin(cfg);
-  diagReason = (int)esp_reset_reason();
-  if (diagMagic != 0xC47B07u || diagReason == ESP_RST_POWERON) { diagMagic = 0xC47B07u; diagBoots = 0; }
-  diagBoots++;
-  Serial.begin(115200);
-  Serial.printf("BOOT reason=%s boots=%lu\n", resetName(diagReason), (unsigned long)diagBoots);
   M5.Display.setBrightness(200);
   canvas.setPsram(true);
   canvas.setColorDepth(16);
