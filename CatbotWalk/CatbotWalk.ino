@@ -3,6 +3,12 @@
 // island on the 466x466 round AMOLED. Made to be watched through the
 // acrylic dome of the StopWatch ball housing.
 // Controls: tap screen or KEY A = jump, KEY B = day / night.
+// Hold KEY A + KEY B together: switch between the island world and
+// galaxy mode. In galaxy mode: hold KEY A = zoom in, KEY B = zoom out
+// (tap also zooms in), and tilt the ball to look at the galaxy from
+// above, from the side, or from below (IMU). The third physical button
+// is the power/reset button and cannot be read by the program, so zoom
+// lives on KEY A / KEY B while in galaxy mode.
 // Sprites: 8 directions pre-rendered from the 3D model (render_sprites.py).
 #include <M5Unified.h>
 #include <math.h>
@@ -81,6 +87,8 @@ struct WorldItem {
 };
 static WorldItem items[1000];
 static int itemCount = 0;
+static bool isFruitTree(const WorldItem &it);  // explicit prototype: keeps the
+// Arduino prototype generator from hoisting its own above the struct
 static inline bool isFruitTree(const WorldItem &it) { return it.type == T_TREE && ((it.var >> 2) % 3) == 0; }
 static const int NSPECK = 1500;
 static float speckles[NSPECK][2];
@@ -101,6 +109,35 @@ static void drawBubble(int idx, float t);
 static void drawFrame(float t);
 static void drawFishWater(const Palette &pal);
 static void drawProp(uint8_t var, const Palette &pal, float t);
+static void genGalaxy();
+static void updateGalaxyView(float dt, float t);
+static void drawGalaxy(float t);
+
+// ---------- galaxy mode ----------
+// A separate mode from the island world (its own branch of history;
+// to be merged with the world view later). A spiral galaxy of ~2400
+// stars with differential rotation. Zoom reaches from the whole
+// galaxy down to individual stars; the viewpoint follows the ball's
+// tilt via the IMU (BMI270), falling back to a slow cinematic orbit
+// when no IMU answer comes back.
+enum AppMode : uint8_t { MODE_WORLD, MODE_GALAXY };
+static AppMode appMode = MODE_WORLD;
+static const float GAL_ZOOM_RATE = 1.6f;   // hold-button zoom speed (log / s)
+static const float GAL_ZOOM_MAX  = 60.0f;  // deepest zoom
+static const float GAL_ROT       = 0.055f; // galaxy spin (rad/s near the core)
+static const float GAL_ELEV_SIGN = 1.0f;   // flip to -1 if tilt up/down feels reversed
+static const float GAL_AZIM_SIGN = 1.0f;   // flip to -1 if tilt rotation feels reversed
+static const int NGAL = 2400;
+struct GalStar { float r, a0, z, om; uint8_t col, mag; };
+static GalStar galStars[NGAL];
+static const int NBG = 90;                 // fixed far-away background stars
+static int16_t galBgX[NBG], galBgY[NBG];
+static uint16_t galBgCol[NBG];
+static uint16_t galPal[7][3];              // [color class][dim, mid, bright]
+static float galZoom = 1.0f, galZoomTgt = 1.0f;
+static float galAz = 0.6f, galEl = 0.9f;   // camera azimuth / elevation (rad)
+static float galGravX = 0, galGravY = 0, galGravZ = 1;
+static bool galImuOk = false;
 
 static int inPond(float x, float y, float m) {  // returns pond index + 1, or 0
   for (int i = 0; i < NPONDS; i++) {
@@ -1072,6 +1109,130 @@ static void drawFrame(float t) {
   canvas.pushSprite(0, 0);
 }
 
+// ---------- galaxy generation / drawing ----------
+static float gRand() {  // approx. gaussian, ~[-1.5, 1.5]
+  return (frand() + frand() + frand() - 1.5f) * 0.6667f;
+}
+
+static void genGalaxy() {
+  static const uint8_t base[7][3] = {
+    {178, 204, 255}, {240, 244, 255}, {255, 240, 214}, {255, 214, 130},
+    {255, 166, 88},  {255, 120, 90},  {255, 160, 200},
+  };
+  for (int c = 0; c < 7; c++)
+    for (int s = 0; s < 3; s++) {
+      float f = s == 0 ? 0.40f : (s == 1 ? 0.72f : 1.0f);
+      galPal[c][s] = C((int)(base[c][0] * f), (int)(base[c][1] * f),
+                       (int)(base[c][2] * f));
+    }
+  for (int i = 0; i < NGAL; i++) {
+    GalStar &s = galStars[i];
+    if (frand() < 0.10f) {  // spherical halo star
+      s.r = 0.25f + 0.85f * powf(frand(), 0.7f);
+      s.a0 = frand() * 6.2831853f;
+      s.z = gRand() * 0.30f;
+      s.col = frand() < 0.6f ? 2 : 1;
+      s.mag = frand() < 0.15f ? 1 : 0;
+    } else {  // two-arm spiral
+      float arm = (i & 1) ? 3.1415927f : 0.0f;
+      s.r = powf(frand(), 1.7f);
+      if (s.r < 0.015f) s.r = 0.015f;
+      float twist = 3.9f * powf(s.r, 0.8f);
+      s.a0 = arm + twist + gRand() * (0.55f - 0.30f * s.r);
+      float thick = 0.045f + 0.16f * expf(-s.r * 5.0f);  // bulge at the core
+      s.z = gRand() * thick;
+      float c = frand();
+      if (s.r < 0.30f)      s.col = c < 0.45f ? 2 : (c < 0.75f ? 3 : (c < 0.90f ? 1 : 4));
+      else if (s.r < 0.65f) s.col = c < 0.35f ? 0 : (c < 0.70f ? 1 : (c < 0.90f ? 2 : 3));
+      else                  s.col = c < 0.50f ? 0 : (c < 0.85f ? 1 : (c < 0.93f ? 6 : 5));
+      float m = frand();
+      s.mag = m < 0.70f ? 0 : (m < 0.94f ? 1 : 2);
+    }
+    s.om = 1.0f / (0.40f + 2.1f * s.r);  // differential rotation
+  }
+  for (int i = 0; i < NBG; i++) {  // background stars, fixed on screen
+    float a = frand() * 6.2831853f, rr = 232.0f * sqrtf(frand());
+    galBgX[i] = (int16_t)(CX + rr * cosf(a));
+    galBgY[i] = (int16_t)(CX + rr * sinf(a));
+    galBgCol[i] = galPal[frand() < 0.5f ? 0 : 1][0];
+  }
+}
+
+static void updateGalaxyView(float dt, float t) {
+  float ax, ay, az;
+  if (M5.Imu.isEnabled() && M5.Imu.getAccel(&ax, &ay, &az)) {
+    float n = sqrtf(ax * ax + ay * ay + az * az);
+    if (n > 0.5f) {
+      float k = 1.0f - expf(-6.0f * dt);
+      galGravX += (ax / n - galGravX) * k;
+      galGravY += (ay / n - galGravY) * k;
+      galGravZ += (az / n - galGravZ) * k;
+      galImuOk = true;
+    }
+  }
+  float ks = 1.0f - expf(-5.0f * dt);
+  if (galImuOk) {
+    float h = sqrtf(galGravX * galGravX + galGravY * galGravY);
+    float elT = atan2f(galGravZ, h);  // +pi/2: screen up, 0: edge-on, -pi/2: from below
+    galEl += (elT * GAL_ELEV_SIGN - galEl) * ks;
+    if (h > 0.28f) {
+      float azT = atan2f(galGravY, galGravX) * GAL_AZIM_SIGN;
+      while (azT - galAz > 3.1415927f) azT -= 6.2831853f;
+      while (azT - galAz < -3.1415927f) azT += 6.2831853f;
+      galAz += (azT - galAz) * ks;
+    } else {
+      galAz += dt * 0.05f;  // nearly level: drift gently
+    }
+  } else {  // no IMU: slow cinematic orbit
+    galAz = t * 0.07f;
+    galEl = 0.85f + 0.45f * sinf(t * 0.11f);
+  }
+  galZoom += (galZoomTgt - galZoom) * (1.0f - expf(-7.0f * dt));
+}
+
+static void drawGalaxy(float t) {
+  canvas.fillScreen(C(2, 3, 8));
+  for (int i = 0; i < NBG; i++) canvas.drawPixel(galBgX[i], galBgY[i], galBgCol[i]);
+  float scale = 216.0f * galZoom;
+  float cA = cosf(galAz), sA = sinf(galAz);
+  float cE = cosf(galEl), sE = sinf(galEl);
+  if (galZoom < 5.0f) {  // soft core glow, only while the core is small on screen
+    int gr = (int)(54.0f * galZoom);
+    canvas.fillCircle(CX, CX, gr, C(16, 13, 24));
+    canvas.fillCircle(CX, CX, gr * 2 / 3, C(30, 24, 38));
+    canvas.fillCircle(CX, CX, gr / 3, C(52, 42, 58));
+  }
+  for (int pass = 0; pass < 3; pass++) {  // dim stars first, bright last
+    for (int i = 0; i < NGAL; i++) {
+      const GalStar &s = galStars[i];
+      if (s.mag != pass) continue;
+      float ang = s.a0 + GAL_ROT * s.om * t;
+      float x = s.r * cosf(ang), y = s.r * sinf(ang);
+      float x1 = x * cA - y * sA;
+      float y1 = x * sA + y * cA;
+      float syw = y1 * sE + s.z * cE;
+      float dep = -y1 * cE + s.z * sE;
+      float persp = 3.4f / (3.4f + dep);
+      float px = CX + x1 * persp * scale;
+      float py = CX - syw * persp * scale;
+      float dx = px - CX, dy = py - CX;
+      if (dx * dx + dy * dy > 236.0f * 236.0f) continue;
+      if (pass == 0) {
+        canvas.drawPixel((int)px, (int)py, galPal[s.col][(i & 1) ? 1 : 0]);
+      } else if (pass == 1) {
+        if (galZoom > 8.0f) canvas.fillCircle((int)px, (int)py, 2, galPal[s.col][1]);
+        else canvas.drawPixel((int)px, (int)py, galPal[s.col][2]);
+      } else {
+        int shade = sinf(t * 2.3f + i * 1.7f) > -0.3f ? 2 : 1;  // gentle twinkle
+        int gr2 = galZoom < 3.0f ? 3 : (galZoom < 12.0f ? 4 : 5);
+        canvas.fillCircle((int)px, (int)py, gr2, galPal[s.col][0]);
+        canvas.fillCircle((int)px, (int)py, gr2 - 1, galPal[s.col][shade]);
+      }
+    }
+  }
+  canvas.pushSprite(0, 0);
+}
+
 void setup() {
   auto cfg = M5.config();
   M5.begin(cfg);
@@ -1080,6 +1241,7 @@ void setup() {
   canvas.setColorDepth(16);
   canvas.createSprite(SCR, SCR);
   genWorld();
+  genGalaxy();
   buildObstacles();
   buildTints();
   buildBotSprites();
@@ -1096,6 +1258,34 @@ void loop() {
   if (dt > 0.05f) dt = 0.05f;
   float t = now / 1000.0f;
   gT = t;
+
+  // --- mode switch: hold KEY A + KEY B together ---
+  static float comboHold = 0;
+  static bool comboLatch = false;
+  if (M5.BtnA.isPressed() && M5.BtnB.isPressed()) {
+    comboHold += dt;
+    if (comboHold > 0.35f && !comboLatch) {
+      comboLatch = true;
+      appMode = (appMode == MODE_WORLD) ? MODE_GALAXY : MODE_WORLD;
+    }
+  } else {
+    comboHold = 0;
+    if (!M5.BtnA.isPressed() && !M5.BtnB.isPressed()) comboLatch = false;
+  }
+
+  if (appMode == MODE_GALAXY) {  // the island world pauses while stargazing
+    if (M5.BtnA.isPressed() && !M5.BtnB.isPressed())
+      galZoomTgt = fminf(GAL_ZOOM_MAX, galZoomTgt * expf(GAL_ZOOM_RATE * dt));
+    if (M5.BtnB.isPressed() && !M5.BtnA.isPressed())
+      galZoomTgt = fmaxf(1.0f, galZoomTgt * expf(-GAL_ZOOM_RATE * dt));
+    if (M5.Touch.getCount() > 0) {
+      auto d = M5.Touch.getDetail(0);
+      if (d.wasClicked()) galZoomTgt = fminf(GAL_ZOOM_MAX, galZoomTgt * 1.6f);
+    }
+    updateGalaxyView(dt, t);
+    drawGalaxy(t);
+    return;
+  }
 
   if (M5.Touch.getCount() > 0) {
     auto d = M5.Touch.getDetail(0);
